@@ -13,8 +13,12 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Random;
+import java.util.Set;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -22,15 +26,19 @@ public class MainActivity extends AppCompatActivity {
     private ActivityResultLauncher<String[]> selectFileLauncher;
     private ActivityResultLauncher<String> saveFileLauncher;
 
-    // Паттерн для SRT / VTT (00:00:01,000 --> 00:00:04,000)
-    private static final Pattern SRT_TIME_PATTERN = Pattern.compile(
-            "(\\d{1,2}:?\\d{2}:\\d{2}[.,]\\d{3})\\s*-->\\s*(\\d{1,2}:?\\d{2}:\\d{2}[.,]\\d{3})"
-    );
+    // Предлоги (не ставим точку ПОСЛЕ этих слов)
+    private static final Set<String> PREPOSITIONS = new HashSet<>(Arrays.asList(
+            "в", "во", "на", "с", "со", "из", "к", "ко", "о", "об", "обо",
+            "для", "по", "под", "подо", "над", "надо", "при", "без", "безо",
+            "до", "от", "ото", "через", "за", "между", "перед", "передо", "про", "сквозь"
+    ));
 
-    // Паттерн для SAMI / .smi (<SYNC Start=12345>)
-    private static final Pattern SAMI_TIME_PATTERN = Pattern.compile(
-            "(?i)<SYNC\\s+Start=(\\d+)>"
-    );
+    // Союзы и подчинительные слова (не ставим точку ПЕРЕД ними, а ставим запятую)
+    private static final Set<String> CONJUNCTIONS = new HashSet<>(Arrays.asList(
+            "что", "чтобы", "потому", "но", "а", "как", "где", "который", "которая",
+            "которое", "которые", "если", "когда", "или", "также", "тоже", "зачем",
+            "почему", "куда", "откуда", "чем", "хотя", "будто", "словно"
+    ));
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -69,78 +77,95 @@ public class MainActivity extends AppCompatActivity {
         try (InputStream inputStream = getContentResolver().openInputStream(uri);
              BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream, StandardCharsets.UTF_8))) {
 
-            StringBuilder sb = new StringBuilder();
+            StringBuilder rawContent = new StringBuilder();
             String line;
-            String lastLine = "";
-
-            long lastStartTimeMs = -1;
-            int currentParagraphLength = 0;
-            boolean startNewParagraph = true;
 
             while ((line = reader.readLine()) != null) {
-                // 1. Первичная очистка строки от HTML-комментариев и системного мусора
-                line = line.replaceAll("<!--[\\s\\S]*?-->", "")
-                           .replaceAll("<[^>]+>", "")
-                           .replaceAll("\\[.*?\\]", "")
-                           .replaceAll("\\{[^}]*\\}", "")
-                           .replaceAll("&nbsp;|&#160;", " ")
-                           .replaceAll("&amp;", "&")
-                           .replaceAll("&quot;", "\"")
-                           .replaceAll("&lt;", "<")
-                           .replaceAll("&gt;", ">")
-                           .replaceAll("&#39;", "'")
-                           .replaceAll("\\s+", " ")
-                           .trim();
+                rawContent.append(line).append(" ");
+            }
 
-                if (line.isEmpty() || line.matches("^\\d+$") || line.startsWith("WEBVTT") || line.equalsIgnoreCase("SAMI")) {
-                    continue;
-                }
+            // 1. Полная очистка от разметки, комментариев, таймкодов и тегов
+            String text = rawContent.toString();
 
-                long currentStartTimeMs = -1;
+            text = text.replaceAll("<!--[\\s\\S]*?-->", " ");
+            text = text.replaceAll("<[^>]+>", " ");
+            text = text.replaceAll("\\[.*?\\]", " ");
+            text = text.replaceAll("\\{[^}]*\\}", " ");
+            text = text.replaceAll("\\d{1,2}:?\\d{2}:\\d{2}[.,]\\d{3}\\s*-->\\s*\\d{1,2}:?\\d{2}:\\d{2}[.,]\\d{3}", " ");
+            text = text.replaceAll("(?m)^\\d+$", " ");
+            text = text.replaceAll("&nbsp;|&#160;", " ")
+                       .replaceAll("&amp;", "&")
+                       .replaceAll("&quot;", "\"")
+                       .replaceAll("&lt;", "<")
+                       .replaceAll("&gt;", ">")
+                       .replaceAll("&#39;", "'");
 
-                // 2. Детекция таймкодов
-                Matcher srtMatcher = SRT_TIME_PATTERN.matcher(line);
-                Matcher samiMatcher = SAMI_TIME_PATTERN.matcher(line);
+            text = text.replaceAll("\\s+", " ").trim();
 
-                if (srtMatcher.find()) {
-                    currentStartTimeMs = parseTimeToMs(srtMatcher.group(1));
-                } else if (samiMatcher.find()) {
-                    currentStartTimeMs = Long.parseLong(samiMatcher.group(1));
-                }
+            if (text.isEmpty()) {
+                Toast.makeText(this, "Файл не содержит текста!", Toast.LENGTH_SHORT).show();
+                return false;
+            }
 
-                // 3. Анализ смысловых пауз (между стартами реплик)
-                if (currentStartTimeMs >= 0) {
-                    if (lastStartTimeMs > 0) {
-                        long gapBetweenStarts = currentStartTimeMs - lastStartTimeMs;
+            // 2. Разбиение на слова и применение грамматической эвристики
+            String[] words = text.split(" ");
+            List<String> cleanWords = new ArrayList<>();
 
-                        // Если пауза между фразами > 3.5 сек ИЛИ набралось > 450 символов в блоке -> НОВЫЙ АБЗАЦ
-                        if (gapBetweenStarts >= 3500 || currentParagraphLength > 450) {
-                            ensureSentenceEnd(sb);
-                            sb.append("\n\n");
-                            currentParagraphLength = 0;
-                            startNewParagraph = true;
-                        }
-                    }
-                    lastStartTimeMs = currentStartTimeMs;
-                    continue;
-                }
-
-                // 4. Добавление чистого текста
-                if (!line.isEmpty() && !line.equals(lastLine)) {
-                    if (startNewParagraph) {
-                        line = capitalizeFirstChar(line);
-                        startNewParagraph = false;
-                    }
-
-                    sb.append(line).append(" ");
-                    currentParagraphLength += line.length();
-                    lastLine = line;
+            for (String w : words) {
+                if (!w.equalsIgnoreCase("WEBVTT") && !w.equalsIgnoreCase("SAMI") && !w.equalsIgnoreCase("STYLE")) {
+                    cleanWords.add(w);
                 }
             }
 
-            ensureSentenceEnd(sb);
-            cleanedTextResult = sb.toString().trim();
+            StringBuilder result = new StringBuilder();
+            List<String> currentSentence = new ArrayList<>();
 
+            Random random = new Random();
+            int sentenceCountInParagraph = 0;
+            // Длина текущего абзаца случайно от 6 до 10 предложений
+            int targetParagraphLength = 6 + random.nextInt(5);
+
+            for (int i = 0; i < cleanWords.size(); i++) {
+                String word = cleanWords.get(i);
+                String wordLower = word.toLowerCase();
+
+                currentSentence.add(word);
+
+                boolean isLastWordInFile = (i == cleanWords.size() - 1);
+                String nextWordLower = (!isLastWordInFile) ? cleanWords.get(i + 1).toLowerCase() : "";
+
+                // Автоматическая подстановка запятой перед союзом
+                if (currentSentence.size() >= 5 && CONJUNCTIONS.contains(nextWordLower)) {
+                    if (!word.endsWith(",") && !word.endsWith(".") && !word.endsWith("!") && !word.endsWith("?")) {
+                        currentSentence.set(currentSentence.size() - 1, word + ",");
+                    }
+                }
+
+                // Условия завершения предложения
+                boolean targetLengthReached = currentSentence.size() >= 12;
+                boolean notPreposition = !PREPOSITIONS.contains(wordLower);
+                boolean nextNotConjunction = !CONJUNCTIONS.contains(nextWordLower);
+                boolean forceBreak = currentSentence.size() >= 22;
+
+                if ((targetLengthReached && notPreposition && nextNotConjunction) || forceBreak || isLastWordInFile) {
+                    String formattedSentence = buildSentenceString(currentSentence);
+                    result.append(formattedSentence);
+
+                    sentenceCountInParagraph++;
+                    currentSentence.clear();
+
+                    // Формирование абзаца с псевдослучайной длиной (6–10 предложений)
+                    if (sentenceCountInParagraph >= targetParagraphLength) {
+                        result.append("\n\n");
+                        sentenceCountInParagraph = 0;
+                        targetParagraphLength = 6 + random.nextInt(5); // Новое случайное число для следующего абзаца
+                    } else {
+                        result.append(" ");
+                    }
+                }
+            }
+
+            cleanedTextResult = result.toString().trim();
             Toast.makeText(this, "Текст успешно структурирован!", Toast.LENGTH_SHORT).show();
             return true;
 
@@ -150,41 +175,30 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private void ensureSentenceEnd(StringBuilder sb) {
-        String str = sb.toString().trim();
-        if (str.isEmpty()) return;
+    private String buildSentenceString(List<String> words) {
+        if (words.isEmpty()) return "";
 
-        char lastChar = str.charAt(str.length() - 1);
-        if (lastChar != '.' && lastChar != '!' && lastChar != '?') {
-            sb.trimToSize();
-            if (sb.length() > 0 && sb.charAt(sb.length() - 1) == ' ') {
-                sb.deleteCharAt(sb.length() - 1);
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < words.size(); i++) {
+            String w = words.get(i);
+            if (i == 0) {
+                w = Character.toUpperCase(w.charAt(0)) + w.substring(1);
             }
-            sb.append(".");
+            sb.append(w);
+            if (i < words.size() - 1) {
+                sb.append(" ");
+            }
         }
-    }
 
-    private String capitalizeFirstChar(String str) {
-        if (str == null || str.isEmpty()) return str;
-        return Character.toUpperCase(str.charAt(0)) + str.substring(1);
-    }
+        String sentence = sb.toString().trim();
+        char lastChar = sentence.charAt(sentence.length() - 1);
+        if (lastChar != '.' && lastChar != '!' && lastChar != '?' && lastChar != ',') {
+            sentence += ".";
+        } else if (lastChar == ',') {
+            sentence = sentence.substring(0, sentence.length() - 1) + ".";
+        }
 
-    private long parseTimeToMs(String timeStr) {
-        try {
-            timeStr = timeStr.replace(',', '.');
-            String[] parts = timeStr.split(":");
-            if (parts.length == 3) {
-                long hours = Long.parseLong(parts[0]);
-                long minutes = Long.parseLong(parts[1]);
-                double seconds = Double.parseDouble(parts[2]);
-                return (long) ((hours * 3600 + minutes * 60 + seconds) * 1000);
-            } else if (parts.length == 2) {
-                long minutes = Long.parseLong(parts[0]);
-                double seconds = Double.parseDouble(parts[1]);
-                return (long) ((minutes * 60 + seconds) * 1000);
-            }
-        } catch (Exception ignored) {}
-        return 0;
+        return sentence;
     }
 
     private void saveToStorage(Uri uri) {
