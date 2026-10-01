@@ -86,7 +86,7 @@ public class MainActivity extends AppCompatActivity {
         btnSelectFile.setTextSize(16);
 
         btnProcessAi = new Button(this);
-        btnProcessAi.setText("✨ 2. Причесать через Gemini AI (Онлайн)");
+        btnProcessAi.setText("✨ 2. AI анализ (Онлайн)");
         btnProcessAi.setTextSize(16);
         btnProcessAi.setEnabled(false);
 
