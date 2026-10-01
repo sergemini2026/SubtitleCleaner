@@ -22,9 +22,14 @@ public class MainActivity extends AppCompatActivity {
     private ActivityResultLauncher<String[]> selectFileLauncher;
     private ActivityResultLauncher<String> saveFileLauncher;
 
-    // Регулярное выражение для поиска таймкодов вида 00:00:01,000 --> 00:00:04,000
-    private static final Pattern TIME_PATTERN = Pattern.compile(
+    // Паттерн для SRT / VTT (00:00:01,000 --> 00:00:04,000)
+    private static final Pattern SRT_TIME_PATTERN = Pattern.compile(
             "(\\d{1,2}:?\\d{2}:\\d{2}[.,]\\d{3})\\s*-->\\s*(\\d{1,2}:?\\d{2}:\\d{2}[.,]\\d{3})"
+    );
+
+    // Паттерн для SAMI / .smi (<SYNC Start=12345>)
+    private static final Pattern SAMI_TIME_PATTERN = Pattern.compile(
+            "(?i)<SYNC\\s+Start=(\\d+)>"
     );
 
     @Override
@@ -69,42 +74,69 @@ public class MainActivity extends AppCompatActivity {
             String lastLine = "";
 
             long lastEndTimeMs = -1;
-            long currentStartTimeMs = -1;
+            long lastStartTimeMs = -1;
             int currentParagraphLength = 0;
             boolean startNewSentence = true;
 
             while ((line = reader.readLine()) != null) {
                 line = line.trim();
 
-                if (line.isEmpty() || line.matches("^\\d+$") || line.startsWith("WEBVTT") || line.startsWith("SAMI") || line.startsWith("<SAMI>")) {
+                if (line.isEmpty() || line.matches("^\\d+$") || line.startsWith("WEBVTT") || line.equalsIgnoreCase("SAMI") || line.equalsIgnoreCase("<SAMI>")) {
                     continue;
                 }
 
-                // Извлечение таймкодов и расчет временных пауз
-                Matcher matcher = TIME_PATTERN.matcher(line);
-                if (matcher.find()) {
-                    currentStartTimeMs = parseTimeToMs(matcher.group(1));
-                    long newEndTimeMs = parseTimeToMs(matcher.group(2));
+                long currentStartTimeMs = -1;
+                long currentEndTimeMs = -1;
 
-                    if (lastEndTimeMs > 0 && currentStartTimeMs > 0) {
-                        long gap = currentStartTimeMs - lastEndTimeMs;
+                // 1. Поиск таймкода SRT / VTT
+                Matcher srtMatcher = SRT_TIME_PATTERN.matcher(line);
+                if (srtMatcher.find()) {
+                    currentStartTimeMs = parseTimeToMs(srtMatcher.group(1));
+                    currentEndTimeMs = parseTimeToMs(srtMatcher.group(2));
+                } else {
+                    // 2. Поиск таймкода SAMI (.smi)
+                    Matcher samiMatcher = SAMI_TIME_PATTERN.matcher(line);
+                    if (samiMatcher.find()) {
+                        currentStartTimeMs = Long.parseLong(samiMatcher.group(1));
+                    }
+                }
 
-                        // Пауза больше 1.2 секунды ИЛИ накопилось > 350 символов в абзаце
-                        if (gap >= 1200 || currentParagraphLength > 350) {
+                // Расчет пауз при обнаружении любого таймкода
+                if (currentStartTimeMs >= 0) {
+                    long gap = 0;
+                    if (lastEndTimeMs > 0) {
+                        gap = currentStartTimeMs - lastEndTimeMs;
+                    } else if (lastStartTimeMs > 0) {
+                        gap = currentStartTimeMs - lastStartTimeMs - 1500; // Оценка для SAMI
+                    }
+
+                    if (gap > 0) {
+                        // Длинная пауза (>= 1.4с) ИЛИ набралось > 200 символов при паузе >= 0.5с -> НОВЫЙ АБЗАЦ
+                        if (gap >= 1400 || (gap >= 500 && currentParagraphLength > 200)) {
                             ensureSentenceEnd(sb);
                             sb.append("\n\n");
                             currentParagraphLength = 0;
                             startNewSentence = true;
+                        } 
+                        // Короткая пауза (>= 0.5с) -> Точка и новое предложение
+                        else if (gap >= 500) {
+                            ensureSentenceEnd(sb);
+                            sb.append(" ");
+                            startNewSentence = true;
                         }
                     }
 
-                    lastEndTimeMs = newEndTimeMs;
-                    continue;
+                    lastStartTimeMs = currentStartTimeMs;
+                    lastEndTimeMs = (currentEndTimeMs >= 0) ? currentEndTimeMs : (currentStartTimeMs + 1500);
+
+                    // Очищаем метку SAMI из текущей строки
+                    line = line.replaceAll("(?i)<SYNC\\s+Start=\\d+>", "");
                 }
 
-                // Очистка от HTML, CSS и спецсимволов
+                // Глубокая очистка от HTML, служебных тегов и комментариев
                 line = line.replaceAll("<!--.*?-->", "")
                            .replaceAll("<[^>]+>", "")
+                           .replaceAll("\\[.*?\\]", "")  // Удаляет [музыка], [аплодисменты]
                            .replaceAll("\\{[^}]*\\}", "")
                            .replaceAll("&nbsp;|&#160;", " ")
                            .replaceAll("&amp;", "&")
@@ -116,7 +148,6 @@ public class MainActivity extends AppCompatActivity {
                            .trim();
 
                 if (!line.isEmpty() && !line.equals(lastLine)) {
-                    // Форматирование первой буквы предложения
                     if (startNewSentence) {
                         line = capitalizeFirstChar(line);
                         startNewSentence = false;
@@ -125,14 +156,21 @@ public class MainActivity extends AppCompatActivity {
                     sb.append(line).append(" ");
                     currentParagraphLength += line.length();
                     lastLine = line;
+
+                    // Жесткое ограничение длины абзаца (максимум 300 символов)
+                    if (currentParagraphLength > 300) {
+                        ensureSentenceEnd(sb);
+                        sb.append("\n\n");
+                        currentParagraphLength = 0;
+                        startNewSentence = true;
+                    }
                 }
             }
 
-            // Финальная сборка и зачистка
             ensureSentenceEnd(sb);
             cleanedTextResult = sb.toString().trim();
 
-            Toast.makeText(this, "Текст структурирован по абзацам!", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "Текст успешно структурирован!", Toast.LENGTH_SHORT).show();
             return true;
 
         } catch (Exception e) {
@@ -148,7 +186,6 @@ public class MainActivity extends AppCompatActivity {
         char lastChar = str.charAt(str.length() - 1);
         if (lastChar != '.' && lastChar != '!' && lastChar != '?') {
             sb.trimToSize();
-            // Убираем последний пробел перед точкой
             if (sb.length() > 0 && sb.charAt(sb.length() - 1) == ' ') {
                 sb.deleteCharAt(sb.length() - 1);
             }
