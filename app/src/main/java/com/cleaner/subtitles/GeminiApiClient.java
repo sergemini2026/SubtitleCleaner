@@ -10,13 +10,15 @@ import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public class GeminiApiClient {
 
-    private static final String API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=";
+    // Использование актуальной версии модели Gemini
+    private static final String BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=";
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
@@ -29,13 +31,15 @@ public class GeminiApiClient {
         executor.execute(() -> {
             HttpURLConnection conn = null;
             try {
-                URL url = new URL(API_URL + apiKey.trim());
+                String cleanKey = apiKey.trim();
+                URL url = new URL(BASE_URL + URLEncoder.encode(cleanKey, "UTF-8"));
+                
                 conn = (HttpURLConnection) url.openConnection();
                 conn.setRequestMethod("POST");
-                conn.setRequestProperty("Content-Type", "application/json; utf-8");
+                conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
                 conn.setDoOutput(true);
                 conn.setConnectTimeout(20000);
-                conn.setReadTimeout(40000);
+                conn.setReadTimeout(60000);
 
                 String systemPrompt = "Ты — профессиональный редактор и корректор расшифровок публичных лекций. " +
                         "Тебе дан сырой структурированный текст субтитров. " +
