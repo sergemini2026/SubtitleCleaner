@@ -1,8 +1,16 @@
 package com.cleaner.subtitles;
 
+import android.content.SharedPreferences;
 import android.net.Uri;
 import android.os.Bundle;
+import android.text.InputType;
+import android.view.View;
 import android.widget.Button;
+import android.widget.EditText;
+import android.widget.LinearLayout;
+import android.widget.ProgressBar;
+import android.widget.ScrollView;
+import android.widget.TextView;
 import android.widget.Toast;
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
@@ -26,21 +34,27 @@ public class MainActivity extends AppCompatActivity {
     private ActivityResultLauncher<String[]> selectFileLauncher;
     private ActivityResultLauncher<String> saveFileLauncher;
 
-    // СЛОВА, НА КОТОРЫХ КАТЕГОРИЧЕСКИ НЕЛЬЗЯ ЗАКАНЧИВАТЬ ПРЕДЛОЖЕНИЕ (предлоги, союзы, частицы)
+    private EditText etApiKey;
+    private Button btnSelectFile;
+    private Button btnProcessAi;
+    private ProgressBar progressBar;
+    private TextView tvStatus;
+
+    private SharedPreferences prefs;
+    private final GeminiApiClient geminiClient = new GeminiApiClient();
+
+    private static final String PREF_KEY_API = "gemini_api_key";
+
     private static final Set<String> FORBIDDEN_END_WORDS = new HashSet<>(Arrays.asList(
-            // Предлоги
             "в", "во", "на", "с", "со", "из", "к", "ко", "о", "об", "обо",
             "для", "по", "под", "подо", "над", "надо", "при", "без", "безо",
             "до", "от", "ото", "через", "за", "между", "перед", "передо", "про", "сквозь",
-            // Союзы и связки
             "и", "а", "но", "да", "или", "либо", "что", "чтобы", "как", "где", "когда",
             "если", "хотя", "будто", "словно", "чем", "зачем", "почему", "куда", "откуда",
             "который", "которая", "которое", "которые", "также", "тоже", "ибо",
-            // Частицы
             "ли", "же", "бы", "даже", "ни", "не"
     ));
 
-    // Союзы для подстановки запятых ПЕРЕД ними
     private static final Set<String> CONJUNCTIONS_FOR_COMMA = new HashSet<>(Arrays.asList(
             "что", "чтобы", "потому", "но", "а", "как", "где", "который", "которая",
             "которое", "которые", "если", "когда", "или", "также", "тоже", "зачем",
@@ -50,17 +64,57 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        prefs = getSharedPreferences("SubtitleCleanerPrefs", MODE_PRIVATE);
 
-        Button btn = new Button(this);
-        btn.setText("📂 Выбрать файл субтитров (.srt / .vtt / .smi)");
-        btn.setTextSize(18);
-        btn.setPadding(40, 50, 40, 50);
+        // Построение пользовательского интерфейса
+        ScrollView scrollView = new ScrollView(this);
+        LinearLayout layout = new LinearLayout(this);
+        layout.setOrientation(LinearLayout.VERTICAL);
+        layout.setPadding(40, 40, 40, 40);
+
+        TextView tvTitle = new TextView(this);
+        tvTitle.setText("🔑 Gemini API Key:");
+        tvTitle.setTextSize(16);
+
+        etApiKey = new EditText(this);
+        etApiKey.setHint("Вставьте ваш API ключ здесь");
+        etApiKey.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        etApiKey.setText(prefs.getString(PREF_KEY_API, ""));
+
+        btnSelectFile = new Button(this);
+        btnSelectFile.setText("📂 1. Выбрать и очистить файл субтитров");
+        btnSelectFile.setTextSize(16);
+
+        btnProcessAi = new Button(this);
+        btnProcessAi.setText("✨ 2. Причесать через Gemini AI (Онлайн)");
+        btnProcessAi.setTextSize(16);
+        btnProcessAi.setEnabled(false);
+
+        progressBar = new ProgressBar(this);
+        progressBar.setVisibility(View.GONE);
+
+        tvStatus = new TextView(this);
+        tvStatus.setPadding(0, 20, 0, 20);
+        tvStatus.setTextSize(14);
+
+        layout.addView(tvTitle);
+        layout.addView(etApiKey);
+        layout.addView(btnSelectFile);
+        layout.addView(btnProcessAi);
+        layout.addView(progressBar);
+        layout.addView(tvStatus);
+        scrollView.addView(layout);
+
+        setContentView(scrollView);
 
         selectFileLauncher = registerForActivityResult(
             new ActivityResultContracts.OpenDocument(),
             uri -> {
                 if (uri != null) {
+                    saveApiKey();
                     if (processSubtitleFile(uri)) {
+                        btnProcessAi.setEnabled(true);
+                        tvStatus.setText("Файл первично очищен! Теперь можно сохранить его как есть или обработать через Gemini AI.");
                         saveFileLauncher.launch("structured_subtitles.txt");
                     }
                 }
@@ -76,8 +130,49 @@ public class MainActivity extends AppCompatActivity {
             }
         );
 
-        btn.setOnClickListener(v -> selectFileLauncher.launch(new String[]{"*/*"}));
-        setContentView(btn);
+        btnSelectFile.setOnClickListener(v -> selectFileLauncher.launch(new String[]{"*/*"}));
+
+        btnProcessAi.setOnClickListener(v -> {
+            saveApiKey();
+            String key = etApiKey.getText().toString().trim();
+            if (key.isEmpty()) {
+                Toast.makeText(this, "Введите Gemini API Key!", Toast.LENGTH_SHORT).show();
+                return;
+            }
+
+            if (cleanedTextResult.isEmpty()) {
+                Toast.makeText(this, "Сначала выберите файл субтитров!", Toast.LENGTH_SHORT).show();
+                return;
+            }
+
+            progressBar.setVisibility(View.VISIBLE);
+            btnProcessAi.setEnabled(false);
+            tvStatus.setText("Отправка текста в Gemini AI...");
+
+            geminiClient.processTextWithGemini(key, cleanedTextResult, new GeminiApiClient.ApiCallback() {
+                @Override
+                public void onSuccess(String resultText) {
+                    progressBar.setVisibility(View.GONE);
+                    btnProcessAi.setEnabled(true);
+                    cleanedTextResult = resultText;
+                    tvStatus.setText("Текст идеально обработан нейросетью! Выберите место для сохранения.");
+                    saveFileLauncher.launch("ai_edited_subtitles.txt");
+                }
+
+                @Override
+                public void onError(String errorMessage) {
+                    progressBar.setVisibility(View.GONE);
+                    btnProcessAi.setEnabled(true);
+                    tvStatus.setText("Ошибка: " + errorMessage);
+                    Toast.makeText(MainActivity.this, errorMessage, Toast.LENGTH_LONG).show();
+                }
+            });
+        });
+    }
+
+    private void saveApiKey() {
+        String key = etApiKey.getText().toString().trim();
+        prefs.edit().putString(PREF_KEY_API, key).apply();
     }
 
     private boolean processSubtitleFile(Uri uri) {
@@ -91,7 +186,6 @@ public class MainActivity extends AppCompatActivity {
                 rawContent.append(line).append(" ");
             }
 
-            // 1. Очистка от служебного мусора, тегов, комментариев и таймкодов
             String text = rawContent.toString();
             text = text.replaceAll("<!--[\\s\\S]*?-->", " ");
             text = text.replaceAll("<[^>]+>", " ");
@@ -113,7 +207,6 @@ public class MainActivity extends AppCompatActivity {
                 return false;
             }
 
-            // 2. Разбиение на чистые слова
             String[] words = text.split(" ");
             List<String> cleanWords = new ArrayList<>();
 
@@ -137,24 +230,21 @@ public class MainActivity extends AppCompatActivity {
                 currentSentence.add(word);
 
                 boolean isLastWordInFile = (i == cleanWords.size() - 1);
-                String nextWordLower = (!isLastWordInFile) 
-                        ? cleanWords.get(i + 1).toLowerCase().replaceAll("[^a-zа-я0-яё]", "") 
+                String nextWordLower = (!isLastWordInFile)
+                        ? cleanWords.get(i + 1).toLowerCase().replaceAll("[^a-zа-я0-яё]", "")
                         : "";
 
-                // Авто-запятая перед союзом
                 if (currentSentence.size() >= 4 && CONJUNCTIONS_FOR_COMMA.contains(nextWordLower)) {
                     if (!word.endsWith(",") && !word.endsWith(".") && !word.endsWith("!") && !word.endsWith("?")) {
                         currentSentence.set(currentSentence.size() - 1, word + ",");
                     }
                 }
 
-                // ПРАВИЛА ЗАКРЫТИЯ ПРЕДЛОЖЕНИЯ
                 boolean targetLengthReached = currentSentence.size() >= 12;
                 boolean canEndHere = !FORBIDDEN_END_WORDS.contains(wordLower);
                 boolean nextIsConjunction = CONJUNCTIONS_FOR_COMMA.contains(nextWordLower);
                 boolean forceBreak = currentSentence.size() >= 26;
 
-                // Закрываем предложение только если набрана длина, слово НЕ в запрещенном списке, и дальше не идет союз
                 if (((targetLengthReached && canEndHere && !nextIsConjunction) || (forceBreak && canEndHere) || isLastWordInFile)) {
                     String formattedSentence = buildSentenceString(currentSentence);
                     result.append(formattedSentence);
@@ -162,7 +252,6 @@ public class MainActivity extends AppCompatActivity {
                     sentenceCountInParagraph++;
                     currentSentence.clear();
 
-                    // Формирование абзаца с динамической разбивкой (от 2 до 11 предложений)
                     if (sentenceCountInParagraph >= targetParagraphLength) {
                         result.append("\n\n");
                         sentenceCountInParagraph = 0;
@@ -174,7 +263,7 @@ public class MainActivity extends AppCompatActivity {
             }
 
             cleanedTextResult = result.toString().trim();
-            Toast.makeText(this, "Текст успешно структурирован!", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "Файл прочитан и подготовлен!", Toast.LENGTH_SHORT).show();
             return true;
 
         } catch (Exception e) {
@@ -183,15 +272,14 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    // Генерация случайной длины абзаца с живым ритмом
     private int getNextParagraphLength(Random random) {
         int roll = random.nextInt(100);
         if (roll < 20) {
-            return 2 + random.nextInt(2);  // 20% шанса: короткий абзац (2-3 предложения)
+            return 2 + random.nextInt(2);
         } else if (roll < 70) {
-            return 4 + random.nextInt(4);  // 50% шанса: средний абзац (4-7 предложений)
+            return 4 + random.nextInt(4);
         } else {
-            return 8 + random.nextInt(4);  // 30% шанса: длинный абзац (8-11 предложений)
+            return 8 + random.nextInt(4);
         }
     }
 
@@ -212,8 +300,7 @@ public class MainActivity extends AppCompatActivity {
 
         String sentence = sb.toString().trim();
         char lastChar = sentence.charAt(sentence.length() - 1);
-        
-        // Гарантируем корректную точку на конце
+
         if (lastChar != '.' && lastChar != '!' && lastChar != '?') {
             if (lastChar == ',') {
                 sentence = sentence.substring(0, sentence.length() - 1);
@@ -232,4 +319,4 @@ public class MainActivity extends AppCompatActivity {
             Toast.makeText(this, "Ошибка сохранения: " + e.getMessage(), Toast.LENGTH_LONG).show();
         }
     }
-}
+    }
