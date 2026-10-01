@@ -73,70 +73,15 @@ public class MainActivity extends AppCompatActivity {
             String line;
             String lastLine = "";
 
-            long lastEndTimeMs = -1;
             long lastStartTimeMs = -1;
             int currentParagraphLength = 0;
-            boolean startNewSentence = true;
+            boolean startNewParagraph = true;
 
             while ((line = reader.readLine()) != null) {
-                line = line.trim();
-
-                if (line.isEmpty() || line.matches("^\\d+$") || line.startsWith("WEBVTT") || line.equalsIgnoreCase("SAMI") || line.equalsIgnoreCase("<SAMI>")) {
-                    continue;
-                }
-
-                long currentStartTimeMs = -1;
-                long currentEndTimeMs = -1;
-
-                // 1. Поиск таймкода SRT / VTT
-                Matcher srtMatcher = SRT_TIME_PATTERN.matcher(line);
-                if (srtMatcher.find()) {
-                    currentStartTimeMs = parseTimeToMs(srtMatcher.group(1));
-                    currentEndTimeMs = parseTimeToMs(srtMatcher.group(2));
-                } else {
-                    // 2. Поиск таймкода SAMI (.smi)
-                    Matcher samiMatcher = SAMI_TIME_PATTERN.matcher(line);
-                    if (samiMatcher.find()) {
-                        currentStartTimeMs = Long.parseLong(samiMatcher.group(1));
-                    }
-                }
-
-                // Расчет пауз при обнаружении любого таймкода
-                if (currentStartTimeMs >= 0) {
-                    long gap = 0;
-                    if (lastEndTimeMs > 0) {
-                        gap = currentStartTimeMs - lastEndTimeMs;
-                    } else if (lastStartTimeMs > 0) {
-                        gap = currentStartTimeMs - lastStartTimeMs - 1500; // Оценка для SAMI
-                    }
-
-                    if (gap > 0) {
-                        // Длинная пауза (>= 1.4с) ИЛИ набралось > 200 символов при паузе >= 0.5с -> НОВЫЙ АБЗАЦ
-                        if (gap >= 1400 || (gap >= 500 && currentParagraphLength > 200)) {
-                            ensureSentenceEnd(sb);
-                            sb.append("\n\n");
-                            currentParagraphLength = 0;
-                            startNewSentence = true;
-                        } 
-                        // Короткая пауза (>= 0.5с) -> Точка и новое предложение
-                        else if (gap >= 500) {
-                            ensureSentenceEnd(sb);
-                            sb.append(" ");
-                            startNewSentence = true;
-                        }
-                    }
-
-                    lastStartTimeMs = currentStartTimeMs;
-                    lastEndTimeMs = (currentEndTimeMs >= 0) ? currentEndTimeMs : (currentStartTimeMs + 1500);
-
-                    // Очищаем метку SAMI из текущей строки
-                    line = line.replaceAll("(?i)<SYNC\\s+Start=\\d+>", "");
-                }
-
-                // Глубокая очистка от HTML, служебных тегов и комментариев
-                line = line.replaceAll("<!--.*?-->", "")
+                // 1. Первичная очистка строки от HTML-комментариев и системного мусора
+                line = line.replaceAll("<!--[\\s\\S]*?-->", "")
                            .replaceAll("<[^>]+>", "")
-                           .replaceAll("\\[.*?\\]", "")  // Удаляет [музыка], [аплодисменты]
+                           .replaceAll("\\[.*?\\]", "")
                            .replaceAll("\\{[^}]*\\}", "")
                            .replaceAll("&nbsp;|&#160;", " ")
                            .replaceAll("&amp;", "&")
@@ -147,23 +92,49 @@ public class MainActivity extends AppCompatActivity {
                            .replaceAll("\\s+", " ")
                            .trim();
 
+                if (line.isEmpty() || line.matches("^\\d+$") || line.startsWith("WEBVTT") || line.equalsIgnoreCase("SAMI")) {
+                    continue;
+                }
+
+                long currentStartTimeMs = -1;
+
+                // 2. Детекция таймкодов
+                Matcher srtMatcher = SRT_TIME_PATTERN.matcher(line);
+                Matcher samiMatcher = SAMI_TIME_PATTERN.matcher(line);
+
+                if (srtMatcher.find()) {
+                    currentStartTimeMs = parseTimeToMs(srtMatcher.group(1));
+                } else if (samiMatcher.find()) {
+                    currentStartTimeMs = Long.parseLong(samiMatcher.group(1));
+                }
+
+                // 3. Анализ смысловых пауз (между стартами реплик)
+                if (currentStartTimeMs >= 0) {
+                    if (lastStartTimeMs > 0) {
+                        long gapBetweenStarts = currentStartTimeMs - lastStartTimeMs;
+
+                        // Если пауза между фразами > 3.5 сек ИЛИ набралось > 450 символов в блоке -> НОВЫЙ АБЗАЦ
+                        if (gapBetweenStarts >= 3500 || currentParagraphLength > 450) {
+                            ensureSentenceEnd(sb);
+                            sb.append("\n\n");
+                            currentParagraphLength = 0;
+                            startNewParagraph = true;
+                        }
+                    }
+                    lastStartTimeMs = currentStartTimeMs;
+                    continue;
+                }
+
+                // 4. Добавление чистого текста
                 if (!line.isEmpty() && !line.equals(lastLine)) {
-                    if (startNewSentence) {
+                    if (startNewParagraph) {
                         line = capitalizeFirstChar(line);
-                        startNewSentence = false;
+                        startNewParagraph = false;
                     }
 
                     sb.append(line).append(" ");
                     currentParagraphLength += line.length();
                     lastLine = line;
-
-                    // Жесткое ограничение длины абзаца (максимум 300 символов)
-                    if (currentParagraphLength > 300) {
-                        ensureSentenceEnd(sb);
-                        sb.append("\n\n");
-                        currentParagraphLength = 0;
-                        startNewSentence = true;
-                    }
                 }
             }
 
