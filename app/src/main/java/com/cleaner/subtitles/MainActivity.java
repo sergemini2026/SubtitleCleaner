@@ -26,15 +26,22 @@ public class MainActivity extends AppCompatActivity {
     private ActivityResultLauncher<String[]> selectFileLauncher;
     private ActivityResultLauncher<String> saveFileLauncher;
 
-    // Предлоги (не ставим точку ПОСЛЕ этих слов)
-    private static final Set<String> PREPOSITIONS = new HashSet<>(Arrays.asList(
+    // СЛОВА, НА КОТОРЫХ КАТЕГОРИЧЕСКИ НЕЛЬЗЯ ЗАКАНЧИВАТЬ ПРЕДЛОЖЕНИЕ (предлоги, союзы, частицы)
+    private static final Set<String> FORBIDDEN_END_WORDS = new HashSet<>(Arrays.asList(
+            // Предлоги
             "в", "во", "на", "с", "со", "из", "к", "ко", "о", "об", "обо",
             "для", "по", "под", "подо", "над", "надо", "при", "без", "безо",
-            "до", "от", "ото", "через", "за", "между", "перед", "передо", "про", "сквозь"
+            "до", "от", "ото", "через", "за", "между", "перед", "передо", "про", "сквозь",
+            // Союзы и связки
+            "и", "а", "но", "да", "или", "либо", "что", "чтобы", "как", "где", "когда",
+            "если", "хотя", "будто", "словно", "чем", "зачем", "почему", "куда", "откуда",
+            "который", "которая", "которое", "которые", "также", "тоже", "ибо",
+            // Частицы
+            "ли", "же", "бы", "даже", "ни", "не"
     ));
 
-    // Союзы и подчинительные слова (не ставим точку ПЕРЕД ними, а ставим запятую)
-    private static final Set<String> CONJUNCTIONS = new HashSet<>(Arrays.asList(
+    // Союзы для подстановки запятых ПЕРЕД ними
+    private static final Set<String> CONJUNCTIONS_FOR_COMMA = new HashSet<>(Arrays.asList(
             "что", "чтобы", "потому", "но", "а", "как", "где", "который", "которая",
             "которое", "которые", "если", "когда", "или", "также", "тоже", "зачем",
             "почему", "куда", "откуда", "чем", "хотя", "будто", "словно"
@@ -84,9 +91,8 @@ public class MainActivity extends AppCompatActivity {
                 rawContent.append(line).append(" ");
             }
 
-            // 1. Полная очистка от разметки, комментариев, таймкодов и тегов
+            // 1. Очистка от служебного мусора, тегов, комментариев и таймкодов
             String text = rawContent.toString();
-
             text = text.replaceAll("<!--[\\s\\S]*?-->", " ");
             text = text.replaceAll("<[^>]+>", " ");
             text = text.replaceAll("\\[.*?\\]", " ");
@@ -107,7 +113,7 @@ public class MainActivity extends AppCompatActivity {
                 return false;
             }
 
-            // 2. Разбиение на слова и применение грамматической эвристики
+            // 2. Разбиение на чистые слова
             String[] words = text.split(" ");
             List<String> cleanWords = new ArrayList<>();
 
@@ -122,43 +128,45 @@ public class MainActivity extends AppCompatActivity {
 
             Random random = new Random();
             int sentenceCountInParagraph = 0;
-            // Длина текущего абзаца случайно от 6 до 10 предложений
-            int targetParagraphLength = 6 + random.nextInt(5);
+            int targetParagraphLength = getNextParagraphLength(random);
 
             for (int i = 0; i < cleanWords.size(); i++) {
                 String word = cleanWords.get(i);
-                String wordLower = word.toLowerCase();
+                String wordLower = word.toLowerCase().replaceAll("[^a-zа-я0-яё]", "");
 
                 currentSentence.add(word);
 
                 boolean isLastWordInFile = (i == cleanWords.size() - 1);
-                String nextWordLower = (!isLastWordInFile) ? cleanWords.get(i + 1).toLowerCase() : "";
+                String nextWordLower = (!isLastWordInFile) 
+                        ? cleanWords.get(i + 1).toLowerCase().replaceAll("[^a-zа-я0-яё]", "") 
+                        : "";
 
-                // Автоматическая подстановка запятой перед союзом
-                if (currentSentence.size() >= 5 && CONJUNCTIONS.contains(nextWordLower)) {
+                // Авто-запятая перед союзом
+                if (currentSentence.size() >= 4 && CONJUNCTIONS_FOR_COMMA.contains(nextWordLower)) {
                     if (!word.endsWith(",") && !word.endsWith(".") && !word.endsWith("!") && !word.endsWith("?")) {
                         currentSentence.set(currentSentence.size() - 1, word + ",");
                     }
                 }
 
-                // Условия завершения предложения
+                // ПРАВИЛА ЗАКРЫТИЯ ПРЕДЛОЖЕНИЯ
                 boolean targetLengthReached = currentSentence.size() >= 12;
-                boolean notPreposition = !PREPOSITIONS.contains(wordLower);
-                boolean nextNotConjunction = !CONJUNCTIONS.contains(nextWordLower);
-                boolean forceBreak = currentSentence.size() >= 22;
+                boolean canEndHere = !FORBIDDEN_END_WORDS.contains(wordLower);
+                boolean nextIsConjunction = CONJUNCTIONS_FOR_COMMA.contains(nextWordLower);
+                boolean forceBreak = currentSentence.size() >= 26;
 
-                if ((targetLengthReached && notPreposition && nextNotConjunction) || forceBreak || isLastWordInFile) {
+                // Закрываем предложение только если набрана длина, слово НЕ в запрещенном списке, и дальше не идет союз
+                if (((targetLengthReached && canEndHere && !nextIsConjunction) || (forceBreak && canEndHere) || isLastWordInFile)) {
                     String formattedSentence = buildSentenceString(currentSentence);
                     result.append(formattedSentence);
 
                     sentenceCountInParagraph++;
                     currentSentence.clear();
 
-                    // Формирование абзаца с псевдослучайной длиной (6–10 предложений)
+                    // Формирование абзаца с динамической разбивкой (от 2 до 11 предложений)
                     if (sentenceCountInParagraph >= targetParagraphLength) {
                         result.append("\n\n");
                         sentenceCountInParagraph = 0;
-                        targetParagraphLength = 6 + random.nextInt(5); // Новое случайное число для следующего абзаца
+                        targetParagraphLength = getNextParagraphLength(random);
                     } else {
                         result.append(" ");
                     }
@@ -172,6 +180,18 @@ public class MainActivity extends AppCompatActivity {
         } catch (Exception e) {
             Toast.makeText(this, "Ошибка обработки: " + e.getMessage(), Toast.LENGTH_LONG).show();
             return false;
+        }
+    }
+
+    // Генерация случайной длины абзаца с живым ритмом
+    private int getNextParagraphLength(Random random) {
+        int roll = random.nextInt(100);
+        if (roll < 20) {
+            return 2 + random.nextInt(2);  // 20% шанса: короткий абзац (2-3 предложения)
+        } else if (roll < 70) {
+            return 4 + random.nextInt(4);  // 50% шанса: средний абзац (4-7 предложений)
+        } else {
+            return 8 + random.nextInt(4);  // 30% шанса: длинный абзац (8-11 предложений)
         }
     }
 
@@ -192,10 +212,13 @@ public class MainActivity extends AppCompatActivity {
 
         String sentence = sb.toString().trim();
         char lastChar = sentence.charAt(sentence.length() - 1);
-        if (lastChar != '.' && lastChar != '!' && lastChar != '?' && lastChar != ',') {
+        
+        // Гарантируем корректную точку на конце
+        if (lastChar != '.' && lastChar != '!' && lastChar != '?') {
+            if (lastChar == ',') {
+                sentence = sentence.substring(0, sentence.length() - 1);
+            }
             sentence += ".";
-        } else if (lastChar == ',') {
-            sentence = sentence.substring(0, sentence.length() - 1) + ".";
         }
 
         return sentence;
