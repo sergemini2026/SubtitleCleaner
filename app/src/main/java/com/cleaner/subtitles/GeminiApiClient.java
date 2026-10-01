@@ -6,19 +6,18 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
-import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public class GeminiApiClient {
 
-    // Использование актуальной версии модели Gemini
-    private static final String BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=";
+    private static final String API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=";
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
@@ -31,9 +30,10 @@ public class GeminiApiClient {
         executor.execute(() -> {
             HttpURLConnection conn = null;
             try {
-                String cleanKey = apiKey.trim();
-                URL url = new URL(BASE_URL + URLEncoder.encode(cleanKey, "UTF-8"));
-                
+                // Полная очистка ключа от пробелов, переносов строк и табуляций
+                String cleanKey = apiKey.trim().replaceAll("\\s+", "");
+                URL url = new URL(API_URL + cleanKey);
+
                 conn = (HttpURLConnection) url.openConnection();
                 conn.setRequestMethod("POST");
                 conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
@@ -88,8 +88,21 @@ public class GeminiApiClient {
                         mainHandler.post(() -> callback.onSuccess(resultText));
                     }
                 } else {
-                    int finalResponseCode = responseCode;
-                    mainHandler.post(() -> callback.onError("Ошибка сервера API: HTTP " + finalResponseCode));
+                    // Чтение расшифровки ошибки от Google при любом статусе, отличном от 200 OK
+                    InputStream errorStream = conn.getErrorStream();
+                    String errorDetails = "";
+                    if (errorStream != null) {
+                        try (BufferedReader br = new BufferedReader(new InputStreamReader(errorStream, StandardCharsets.UTF_8))) {
+                            StringBuilder sb = new StringBuilder();
+                            String line;
+                            while ((line = br.readLine()) != null) {
+                                sb.append(line);
+                            }
+                            errorDetails = sb.toString();
+                        }
+                    }
+                    String finalErr = "HTTP " + responseCode + (errorDetails.isEmpty() ? "" : ": " + errorDetails);
+                    mainHandler.post(() -> callback.onError(finalErr));
                 }
 
             } catch (Exception e) {
