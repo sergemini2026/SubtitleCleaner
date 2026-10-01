@@ -25,24 +25,21 @@ public class MainActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
 
         Button btn = new Button(this);
-        btn.setText("📂 Выбрать файл субтитров (.srt / .vtt)");
+        btn.setText("📂 Выбрать файл субтитров (.srt / .vtt / .smi)");
         btn.setTextSize(18);
         btn.setPadding(40, 50, 40, 50);
 
-        // Регистрация вызова системного проводника для выбора
         selectFileLauncher = registerForActivityResult(
             new ActivityResultContracts.OpenDocument(),
             uri -> {
                 if (uri != null) {
                     if (processSubtitleFile(uri)) {
-                        // После успешной обработки сразу вызываем проводник для сохранения
                         saveFileLauncher.launch("cleaned_subtitles.txt");
                     }
                 }
             }
         );
 
-        // Регистрация вызова системного проводника для сохранения
         saveFileLauncher = registerForActivityResult(
             new ActivityResultContracts.CreateDocument("text/plain"),
             uri -> {
@@ -65,19 +62,38 @@ public class MainActivity extends AppCompatActivity {
             String lastLine = "";
 
             while ((line = reader.readLine()) != null) {
-                line = line.strip();
+                line = line.trim();
 
-                // Пропуск пустых строк, таймкодов, номеров кадров и заголовка VTT
+                // 1. Пропуск пустых строк, таймкодов, номеров кадров и заголовков VTT/SAMI
                 if (line.isEmpty() || 
                     line.matches("^\\d+$") || 
                     line.matches("^\\d{2}:\\d{2}.*") || 
                     line.startsWith("WEBVTT") || 
+                    line.startsWith("SAMI") ||
+                    line.startsWith("<SAMI>") ||
                     line.contains("-->")) {
                     continue;
                 }
 
-                // Очистка HTML/VTT тегов
-                line = line.replaceAll("<[^>]+>", "").strip();
+                // 2. Удаление HTML-комментариев вида <!-- ... -->
+                line = line.replaceAll("<!--.*?-->", "");
+
+                // 3. Удаление HTML-тегов вида <...>
+                line = line.replaceAll("<[^>]+>", "");
+
+                // 4. Удаление CSS/метаданных в фигурных скобках вида { Name: ... }
+                line = line.replaceAll("\\{[^}]*\\}", "");
+
+                // 5. Замена HTML-сущностей (&nbsp;, &amp; и др.) на обычные символы
+                line = line.replaceAll("&nbsp;|&#160;", " ")
+                           .replaceAll("&amp;", "&")
+                           .replaceAll("&quot;", "\"")
+                           .replaceAll("&lt;", "<")
+                           .replaceAll("&gt;", ">")
+                           .replaceAll("&#39;", "'");
+
+                // 6. Схлопывание множественных пробелов
+                line = line.replaceAll("\\s+", " ").trim();
 
                 if (!line.isEmpty() && !line.equals(lastLine)) {
                     sb.append(line).append(" ");
@@ -85,7 +101,8 @@ public class MainActivity extends AppCompatActivity {
                 }
             }
 
-            cleanedTextResult = sb.toString().trim();
+            // Итоговая очистка двойных пробелов по всему сформированному тексту
+            cleanedTextResult = sb.toString().replaceAll("\\s+", " ").trim();
             Toast.makeText(this, "Текст очищен. Выберите место для сохранения.", Toast.LENGTH_SHORT).show();
             return true;
 
